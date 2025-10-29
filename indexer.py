@@ -4,6 +4,7 @@ import pickle
 import time
 import shutil
 import json
+import streamlit
 
 from typing import List
 from dotenv import load_dotenv
@@ -42,7 +43,8 @@ except:
 
 # Load environment variables from .env
 load_dotenv(override=True)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = streamlit.secrets["OPENAI_API_KEY"]
 model_embedding_name = "text-embedding-3-small"
 llm_model_name = "gpt-4o-mini"
 

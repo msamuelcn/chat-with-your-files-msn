@@ -2,3 +2,4 @@
 data/
 vectorstores/
 .venv
+__pycache__

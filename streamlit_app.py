@@ -94,14 +94,14 @@ if st.session_state.active_chat_id == "":
         filename = uploaded_file.name
         dest = UPLOAD_DIR / f"{file_id}_{filename}"
         save_uploaded_file(uploaded_file, dest)
-        st.success(f"Saved upload to {dest}")
+        st.success(f"File has been uploaded")
 
         try:
             meta = process_and_index(
                 dest,
                 name=filename,
             )
-            st.success(f"Indexed file. Index UID: {meta['uid']}")
+            st.success(f"File has been processed")
 
             st.session_state.active_chat_id = meta["uid"]
             st.session_state.active_chat_attb = meta

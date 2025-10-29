@@ -16,7 +16,8 @@ from utils import INDEX_DIR
 load_dotenv(override=True)
 
 # Access the key
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = streamlit.secrets["OPENAI_API_KEY"]
 model_embedding_name = "text-embedding-3-small"
 llm_model_name = "gpt-4o-mini"
 embeddings_backend: str = "openai"
