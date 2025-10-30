@@ -54,8 +54,8 @@ The project follows a clean architecture, with distinct responsibilities for eac
     ```
 2.  **Create a Virtual Environment:**
     ```bash
-    python -m venv venv
-    source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
+    python -m venv .venv
+    source .venv/bin/activate  # On Windows, use `.venv\Scripts\activate`
     ```
 3.  **Install Dependencies:**
     ```bash
