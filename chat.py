@@ -6,16 +6,10 @@ from dotenv import load_dotenv
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_classic.chains import (
-    ConversationalRetrievalChain,
-)  # Unused but common in RAG, keeping for reference
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_classic.tools.retriever import create_retriever_tool
 from langchain.agents import create_agent  # Updated import path for agent
 from langchain_core.messages import HumanMessage, AIMessageChunk
-
-# Removed: from langchain.tools import tool (unused)
-# Removed: from langchain_core.prompts import ChatPromptTemplate (unused, prompt is f-string)
 
 # Local imports
 from utils import INDEX_DIRECTORY
@@ -126,8 +120,6 @@ Your primary goal is to provide **accurate, concise, and complete** answers base
         system_prompt=system_prompt,
     )
 
-    # Removed unused 'response' variable initialization
-
     # 7. Stream the response
     for chunk in agent.stream(
         {"messages": [HumanMessage(content=user_query)]}, stream_mode="messages"
@@ -136,5 +128,3 @@ Your primary goal is to provide **accurate, concise, and complete** answers base
         ai_message_chunk, _ = chunk
         if isinstance(ai_message_chunk, AIMessageChunk) and ai_message_chunk.content:
             yield ai_message_chunk.content
-
-    # Removed unused print statements
