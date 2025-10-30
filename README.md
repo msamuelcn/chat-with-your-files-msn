@@ -50,7 +50,7 @@ The project follows a clean architecture, with distinct responsibilities for eac
 1.  **Clone the Repository:**
     ```bash
     git clone [Your Repo Link]
-    cd modular-rag-chatbot
+    cd [project directory]
     ```
 2.  **Create a Virtual Environment:**
     ```bash
@@ -61,7 +61,6 @@ The project follows a clean architecture, with distinct responsibilities for eac
     ```bash
     pip install -r requirements.txt
     ```
-    *(**Note**: Ensure your `requirements.txt` includes all necessary packages like `streamlit`, `langchain`, `openai`, `faiss-cpu`, `pypdf2`, `python-dotenv`, etc.)*
 4.  **Configure Environment Variables:**
     Create a file named **`.env`** in the root directory and add your OpenAI key:
     ```ini
