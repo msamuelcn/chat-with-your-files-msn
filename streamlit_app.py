@@ -1,73 +1,94 @@
-"""
-streamlit_app.py
-Main Streamlit app. Uses the modular components in upload.py, indexer.py, chat.py, utils.py.
-"""
+# streamlit_app.py
 
 import os
 import uuid
-import pickle
-import time
-from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
+# Local imports
 from upload import save_uploaded_file
-
 from indexer import (
     list_indices,
     process_and_index,
     start_clear_files,
-    store_indices_chat_thread_cookies,
-    load_chat_threads,
+    save_chat_history,
+    load_chat_history,
 )
-from utils import DATA_DIR, INDEX_DIR, UPLOAD_DIR
+from utils import UPLOAD_DIRECTORY
 from chat import get_streaming_chain
-from streamlit_cookies_controller import CookieController
+import config  # Using centralized config
 
 # Load environment variables from .env
 load_dotenv(override=True)
 
-start_clear_files()
+# Run cleanup on app start
+try:
+    start_clear_files()
+except Exception:
+    # This will catch serious errors that prevent cleanup but still let the app run
+    st.warning("Automatic file cleanup encountered a serious issue. Check server logs.")
 
+# --- Streamlit Session State Initialization ---
+# Consistent naming: Using snake_case for session state keys
 if "active_chat_id" not in st.session_state:
-    st.session_state.active_chat_id = ""
+    st.session_state.active_chat_id = (
+        ""  # The unique ID of the current active index/chat
+    )
 
-if "active_chat_attb" not in st.session_state:
-    st.session_state.active_chat_attb = {}
+if "active_chat_metadata" not in st.session_state:
+    st.session_state.active_chat_metadata = {}  # Metadata for the current active chat
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+if "display_messages" not in st.session_state:
+    st.session_state.display_messages = []  # Messages for the chat UI
 
-if "chat_thread" not in st.session_state:
-    st.session_state.chat_thread = []
+if "chat_history_list" not in st.session_state:
+    st.session_state.chat_history_list = (
+        []
+    )  # List of (user_prompt, ai_response) tuples for LangChain
+# --- Streamlit Session State Initialization ---
 
 
 st.set_page_config(page_title="RAG Chat Modular", layout="wide")
 st.title("📚 Chat with your files — Modular Streamlit + LangChain + FAISS")
 
 
+# --- Sidebar: Chat History and New Chat Button ---
 with st.sidebar.container():
 
     if st.sidebar.button(":heavy_plus_sign: New chat for your file"):
+        # Reset all session state variables for a new chat
         st.session_state.active_chat_id = ""
-        st.session_state.active_chat_attb = {}
+        st.session_state.active_chat_metadata = {}
+        st.session_state.display_messages = []
+        st.session_state.chat_history_list = []
+        st.rerun()
 
     st.sidebar.header("Chat History")
-    chat_history = list_indices()
-    choices = {f"{m['name']} ({m['n_chunks']} chunks)": m["uid"] for m in chat_history}
+    chat_history_indices = list_indices()
 
-    for ch in chat_history:
-        selected_topic = st.sidebar.button(ch["title"], key=ch["uid"])
-        if selected_topic:
-            st.session_state.active_chat_id = ch["uid"]
-            st.session_state.active_chat_attb = ch
-            st.session_state.messages = []
-            st.session_state.chat_thread = []
+    # Display buttons for past chat indices
+    for chat_meta in chat_history_indices:
+        # Use metadata title/name for the button text
+        button_label = (
+            chat_meta["title"]
+            if chat_meta["title"] != "Untitled Document"
+            else chat_meta["name"]
+        )
+        is_topic_selected = st.sidebar.button(
+            button_label, key=chat_meta["uid"]
+        )  # Renamed variable
+
+        if is_topic_selected:  # Use renamed variable
+            # Set active chat and clear existing messages to trigger history load below
+            st.session_state.active_chat_id = chat_meta["uid"]
+            st.session_state.active_chat_metadata = chat_meta
+            st.session_state.display_messages = []
+            st.session_state.chat_history_list = []
 
             st.markdown(
                 f"""
                     <style>
-                    .st-key-{ch["uid"]} button {{
+                    .st-key-{chat_meta["uid"]} button {{
                         background-color: rgb(85 88 103 / 95%); /* Green */
                         color: white; /* Text color */
                     }}
@@ -75,110 +96,185 @@ with st.sidebar.container():
                     """,
                 unsafe_allow_html=True,
             )
+
+            # st.rerun()
+# --- End Sidebar ---
+
 
 st.markdown("---")  # Separator
 
+
 if st.session_state.active_chat_id == "":
 
-    # Upload area
+    # --- File Upload and Indexing Area ---
     st.header("1) Upload a PDF or TXT")
     uploaded_file = st.file_uploader(
-        "Upload PDF or TXT", type=["pdf", "txt", "md"], accept_multiple_files=False
+        "Upload PDF, TXT, or MD", type=["pdf", "txt", "md"], accept_multiple_files=False
     )
 
-    process_btn = st.button("Process & Index Upload")
+    # --- Important Usage Notes (Drafted for Simplicity) ---
+    st.markdown("---")
+    st.subheader("💡 Important Usage Notes")
+    st.info(
+        """
+        **1. Privacy & Cleanup (Do's)**
+        * **Do** treat this application as a short-term tool.
+        * **Privacy:** Your uploaded files and chat history are saved **locally** on this machine's hard drive (`/data` directory).
+        * **Cleanup:** All files and chats are **automatically deleted after 12 hours** to manage storage space.
 
-    # Process and index upload
-    if uploaded_file and process_btn:
+        **2. Accuracy & Limitations (Don'ts)**
+        * **Don't** expect answers from general web knowledge.
+        * **Accuracy:** The chat is a **Retrieval-Augmented Generation (RAG)** system, meaning it will **only** answer based on the text found in your document.
+        * **Limitation:** If the answer is not in the document, the model is instructed to say, "I apologize, but I could not find a relevant answer in the uploaded document." It will not guess.
+
+        **3. Performance (Do's)**
+        * **Do** be patient during the 'Processing' step.
+        * **Indexing Time:** Creating the index (embeddings) for large files can take a few minutes, depending on the file size.
+        * **Current Settings:** Indexing uses a default chunk size of **1000 tokens** to balance speed and accuracy.
+    """
+    )
+    st.markdown("---")
+    # --- End Usage Notes ---
+
+    # Display a warning about the default chunking settings (Fix: Latency During Indexing)
+    st.info(
+        f"Indexing will use default chunk size of **{config.DEFAULT_CHUNK_SIZE}** and overlap of **{config.DEFAULT_CHUNK_OVERLAP}** for faster processing."
+    )
+
+    process_button = st.button("Process & Index Upload")  # Renamed variable
+
+    if uploaded_file and process_button:  # Use renamed variable
+        # File saving logic
         file_id = str(uuid.uuid4())
         filename = uploaded_file.name
-        dest = UPLOAD_DIR / f"{file_id}_{filename}"
-        save_uploaded_file(uploaded_file, dest)
-        st.success(f"File has been uploaded")
+        destination_path = UPLOAD_DIRECTORY / f"{file_id}_{filename}"
+        save_uploaded_file(uploaded_file, destination_path)
+        st.success(f"The file has been saved.")
 
-        try:
-            meta = process_and_index(
-                dest,
-                name=filename,
-            )
-            st.success(f"File has been processed")
+        with st.spinner("Processing file, generating embeddings, and indexing..."):
+            try:
+                # Process the file, chunk the text, and create the FAISS index
+                metadata = process_and_index(destination_path, file_name=filename)
 
-            st.session_state.active_chat_id = meta["uid"]
-            st.session_state.active_chat_attb = meta
-            st.session_state.messages = []
-            st.session_state.chat_thread = []
+                st.success(f"Successfully indexed file.")
 
-            st.markdown(
-                f"""
-                    <style>
-                    .st-key-{meta["uid"]} button {{
-                        background-color: rgb(85 88 103 / 95%); /* Green */
-                        color: white; /* Text color */
-                    }}
-                    </style>
-                    """,
-                unsafe_allow_html=True,
-            )
-            st.rerun()
+                # Set the newly created index as the active chat
+                st.session_state.active_chat_id = metadata["uid"]
+                st.session_state.active_chat_metadata = metadata
+                st.session_state.display_messages = []
+                st.session_state.chat_history_list = []
+                st.rerun()
+                st.markdown(
+                    f"""
+                        <style>
+                        .st-key-{metadata["uid"]} button {{
+                            background-color: rgb(85 88 103 / 95%); /* Green */
+                            color: white; /* Text color */
+                        }}
+                        </style>
+                        """,
+                    unsafe_allow_html=True,
+                )
 
-        except Exception as e:
-            st.error(f"Failed to process file: {e}")
+            except Exception as e:
+                st.error(f"Failed to process file: {e}")
+                # Clean up the file if processing failed
+                try:
+                    os.remove(destination_path)
+                except Exception:
+                    pass  # Ignore if cleanup fails
+    # --- End Upload Area ---
 
 
-def submit_a_prompt(active_chat_id: str, prompt: str):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    # print(st.session_state.active_chat_id)
+def handle_user_prompt_submission(chat_id: str, document_title: str, prompt: str):
+    """
+    Submits a user prompt, streams the response, updates the chat history, and saves history to file.
+    """
+
+    # 1. Add user message to display state
+    st.session_state.display_messages.append({"role": "user", "content": prompt})
+
+    # 2. Display the user message
     with st.chat_message("user"):
         st.markdown(prompt)
 
+    # 3. Stream the AI response
     with st.chat_message("assistant"):
         stream_generator = get_streaming_chain(
-            active_chat_id, query=prompt, chat_thread=st.session_state.chat_thread
+            chat_id,
+            document_title,
+            user_query=prompt,
+            chat_history=st.session_state.chat_history_list,
         )
-        response = st.write_stream(stream_generator)
+        response = st.write_stream(stream_generator)  # Captures the full response text
 
-    insert_thread = (prompt, response)
-    st.session_state.chat_thread.append(insert_thread)
+    # 4. Update the LangChain-compatible chat history list
+    new_history_pair = (prompt, response)
+    st.session_state.chat_history_list.append(new_history_pair)
 
-    store_indices_chat_thread_cookies(active_chat_id, st.session_state.chat_thread)
+    # 5. Save the updated chat history to file
+    save_chat_history(chat_id, st.session_state.chat_history_list)
 
-    st.session_state.messages.append({"role": "assistant", "content": response})
+    # 6. Add assistant message to display state
+    st.session_state.display_messages.append({"role": "assistant", "content": response})
 
+    # 7. Rerun to ensure all UI elements reflect the new state
     st.rerun()
 
 
-if "active_chat_id" in st.session_state and st.session_state.active_chat_id != "":
+# --- Chat Interface ---
+if st.session_state.active_chat_id != "":
 
-    title = st.session_state.active_chat_attb["title"]
-    file_name = st.session_state.active_chat_attb["name"]
-    n_chunks = st.session_state.active_chat_attb["n_chunks"]
-    chunk_size = st.session_state.active_chat_attb["chunk_size"]
+    metadata = st.session_state.active_chat_metadata
+    title = metadata.get("title", "Untitled Document")
+    file_name = metadata.get("name", "Unknown File")
+    n_chunks = metadata.get("n_chunks", 0)
+    chunk_size = metadata.get("chunk_size", config.DEFAULT_CHUNK_SIZE)
 
-    chat_threads_list = load_chat_threads(st.session_state.active_chat_id)
-
-    st.session_state.chat_thread = [(c[0], c[1]) for c in chat_threads_list]
-
-    chat_threads_list = [
-        {"role": role, "content": content}
-        for pair in chat_threads_list
-        for role, content in zip(["user", "assistant"], pair)
-    ]
-    st.session_state.messages = chat_threads_list
-
-    st.subheader("Title: :newspaper:  " + title)
-    st.markdown("You'll be interacting with your uploaded file: " + file_name)
     st.markdown(
-        "Number of chunks: " + str(n_chunks) + "\t\t chunk size: " + str(chunk_size)
+        f"""
+            <style>
+            .st-key-{st.session_state.active_chat_id} button {{
+                background-color: rgb(85 88 103 / 95%); /* Green */
+                color: white; /* Text color */
+            }}
+            </style>
+            """,
+        unsafe_allow_html=True,
     )
 
+    # Load existing history from file on first entry to a chat
+    if not st.session_state.chat_history_list and not st.session_state.display_messages:
+        raw_chat_history = load_chat_history(
+            st.session_state.active_chat_id
+        )  # Renamed variable
+
+        # chat_history_list is for LangChain (List[Tuple[str, str]])
+        # Assuming load_chat_history returns the correct List[Tuple[str, str]] format
+        st.session_state.chat_history_list = raw_chat_history
+
+        # display_messages is for Streamlit UI (List[Dict[str, str]])
+        st.session_state.display_messages = [
+            {"role": role, "content": content}
+            for pair in raw_chat_history  # Use renamed variable
+            for role, content in zip(["user", "assistant"], pair)
+        ]
+
+    st.subheader(f"Title: :newspaper: **{title}**")
+    st.markdown(f"Interacting with your uploaded file: **{file_name}**")
+    st.markdown(f"Chunks: **{n_chunks}** | Chunk Size: **{chunk_size}**")
+
     if st.button("Summarize this document for me."):
-        submit_a_prompt(
-            st.session_state.active_chat_id, "Summarize this document for me."
+        # Call the submission handler with a pre-defined prompt
+        handle_user_prompt_submission(
+            st.session_state.active_chat_id, title, "Summarize this document for me."
         )
 
-    for message in st.session_state.messages:
+    # Display all previous messages in the chat history
+    for message in st.session_state.display_messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    if prompt := st.chat_input("What is up?"):
-        submit_a_prompt(st.session_state.active_chat_id, prompt)
+    # Chat input box
+    if prompt := st.chat_input("Ask a question about your document..."):
+        handle_user_prompt_submission(st.session_state.active_chat_id, title, prompt)

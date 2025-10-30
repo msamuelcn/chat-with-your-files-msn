@@ -1,212 +1,224 @@
+# indexer.py
+
 import os
 import uuid
 import pickle
 import time
 import shutil
 import json
-import streamlit
-
-from typing import List
+import logging
+from typing import List, Dict, Any
 from dotenv import load_dotenv
 from pathlib import Path
-from utils import INDEX_DIR
+
+# Local imports
+from utils import INDEX_DIRECTORY
+import config  # Using centralized config
 
 from pydantic import BaseModel, Field
 from upload import extract_text
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
 from langchain_core.documents.base import Document
 from langchain_community.vectorstores import FAISS
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from streamlit_cookies_controller import CookieController
-from datetime import datetime, timedelta
+from langchain_core.prompts import (
+    ChatPromptTemplate,
+)  # Kept, but its use is a bit isolated
+
+# Configure logging to provide better feedback for cleanup
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 
-# Initialize cookie manager
-controller = CookieController()
-
-try:
-    chat_uid = controller.get("chat_uid_list")
-    chat_uid_list = json.loads(chat_uid)
-
-    chat_threads_cookies = controller.get("chat_threads")
-    chat_threads_list = json.loads(chat_threads_cookies)
-except:
-    chat_uid_list = []
-    expiration = datetime.now() + timedelta(days=0.5)
-    controller.set("chat_uid_list", json.dumps(chat_uid_list), expires=expiration)
-
-    chat_threads_list = {}
-    expiration = datetime.now() + timedelta(days=0.5)
-    controller.set("chat_threads", json.dumps(chat_threads_list), expires=expiration)
+# --- Configuration Constants (imported from config, standardized to snake_case for local use) ---
+openai_api_key = config.OPENAI_API_KEY
+embeddings_backend = config.EMBEDDINGS_BACKEND
+openai_embedding_model = config.OPENAI_EMBEDDING_MODEL
+llm_model_name = config.LLM_MODEL_NAME
+half_day_in_seconds = config.HALF_DAY_IN_SECONDS
+# --- Configuration Constants ---
 
 
-# Load environment variables from .env
-load_dotenv(override=True)
-# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_API_KEY = streamlit.secrets["OPENAI_API_KEY"]
-model_embedding_name = "text-embedding-3-small"
-llm_model_name = "gpt-4o-mini"
+# --- Chat History Persistence Functions (File-based fix) ---
+def get_history_file_path(chat_id: str) -> Path:
+    """Returns the path to the chat history JSON file within the index directory."""
+    return INDEX_DIRECTORY / chat_id / "history.json"
 
 
-def list_indices():
-    out = []
+def save_chat_history(chat_id: str, chat_history: List):
+    """Saves the current chat thread for a given chat ID to a JSON file."""
+    history_path = get_history_file_path(chat_id)
     try:
-        temp_chat_uid = controller.get("chat_uid_list")
-        temp_chat_uid_list = json.loads(temp_chat_uid)
+        with open(history_path, "w", encoding="utf-8") as f:
+            # chat_history is a List[Tuple[str, str]], which is JSON serializable
+            json.dump(chat_history, f)
+    except IOError as e:
+        logging.error(f"Failed to save chat history for {chat_id}: {e}")
 
-        for d in INDEX_DIR.iterdir():
-            if d.is_dir():
-                p = d / "meta.pkl"
-                if p.exists():
-                    import pickle
-                with open(p, "rb") as f:
-                    meta = pickle.load(f)
 
-                if meta["uid"] in temp_chat_uid_list:
-                    out.append(meta)
+def load_chat_history(chat_id: str) -> List:
+    """Loads the chat thread for a specific chat ID from the JSON file."""
+    history_path = get_history_file_path(chat_id)
+    if history_path.exists():
+        try:
+            with open(history_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (IOError, json.JSONDecodeError) as e:
+            logging.error(f"Failed to load chat history for {chat_id}: {e}")
+            return []  # Return empty list on error
+    return []
 
-    except RuntimeError as e:
-        return []
-    return out
+
+# --- End Chat History Persistence Functions ---
+
+
+def list_indices() -> List[Dict[str, Any]]:
+    """Lists metadata for all available chat indices."""
+    index_metadata = []
+
+    # We now simply list indices that have a meta.pkl file on disk
+    for directory in INDEX_DIRECTORY.iterdir():
+        if directory.is_dir():
+            meta_path = directory / "meta.pkl"
+            if meta_path.exists():
+                try:
+                    with open(meta_path, "rb") as f:
+                        meta = pickle.load(f)
+                    index_metadata.append(meta)
+                except Exception as e:
+                    logging.warning(
+                        f"Could not load metadata for index {directory.name}: {e}"
+                    )
+
+    return index_metadata
 
 
 def start_clear_files():
-    print("start_clear_files")
-    try:
-        for d in INDEX_DIR.iterdir():
-            if d.is_dir():
-                p = d / "meta.pkl"
-                if p.exists():
-                    import pickle
-                with open(p, "rb") as f:
-                    meta = pickle.load(f)
+    """
+    Cleans up old uploaded files and FAISS indices.
+    Improved error handling and logging (Fix: Incomplete Error Handling).
+    """
+    logging.info("Starting file cleanup for old indices.")
 
-                timestamp = meta["uploaded_date"]
-                current_time = time.time()
-                half_day_in_seconds = 0.5 * 24 * 60 * 60
+    for directory in INDEX_DIRECTORY.iterdir():
+        if directory.is_dir():
+            meta_path = directory / "meta.pkl"
 
-                if current_time - timestamp > half_day_in_seconds:
-                    file_path = meta["source_path"]
-                    os.remove(file_path)
-                    print("deleted file: ", file_path)
+            if meta_path.exists():
+                try:
+                    with open(meta_path, "rb") as f:
+                        meta = pickle.load(f)
 
-                    index_path = "data\\indices\\" + meta["uid"]
-                    if os.path.isdir(index_path):
-                        shutil.rmtree(index_path)
-                    print("deleted index: ", index_path)
+                    timestamp = meta["uploaded_date"]
+                    current_time = time.time()
 
-    except RuntimeError as e:
-        print("An error occured", e)
+                    if (
+                        current_time - timestamp > half_day_in_seconds
+                    ):  # Use consistent snake_case
+                        file_path = Path(meta["source_path"])
+
+                        # 1. Delete the original uploaded file
+                        if file_path.exists():
+                            os.remove(file_path)
+                            logging.info(f"Deleted file: {file_path}")
+
+                        # 2. Delete the index directory
+                        shutil.rmtree(directory)
+                        logging.info(f"Deleted index directory: {directory}")
+
+                except FileNotFoundError:
+                    logging.warning(
+                        f"Meta file or source file not found for index {directory.name}. Deleting index directory."
+                    )
+                    try:
+                        shutil.rmtree(directory)
+                    except OSError as e:
+                        logging.error(
+                            f"Failed to delete index directory {directory.name}: {e}"
+                        )
+                except (IOError, pickle.UnpicklingError) as e:
+                    logging.error(
+                        f"Error reading or unpickling meta file in {directory.name}: {e}"
+                    )
+                except OSError as e:
+                    logging.error(f"OS Error during cleanup (permissions?): {e}")
+
+    logging.info("File cleanup complete.")
 
 
-def heuristic_chunk_size(text: str) -> int:
-    n_chars = len(text)
-    if n_chars < 5_000:
-        return 1000
-    if n_chars < 20_000:
-        return 1200
-    if n_chars < 100_000:
-        return 1500
-    return 2000
-
-
-def get_embeddings(backend: str = "openai"):
+def get_embeddings(backend: str = embeddings_backend):  # Use consistent snake_case
+    """Initializes and returns the appropriate embeddings model and dimension."""
     if backend == "openai":
-        embeddings = OpenAIEmbeddings(
-            model="text-embedding-3-small",  # or "text-embedding-3-large"
-            api_key=OPENAI_API_KEY,
+        embeddings_model = OpenAIEmbeddings(
+            model=openai_embedding_model,  # Use consistent snake_case
+            api_key=openai_api_key,  # Use consistent snake_case
         )
+    elif backend == "huggingface":
+        from langchain_community.embeddings import HuggingFaceEmbeddings
 
-        sample = "test"
-        vector = embeddings.embed_query(sample)
-        embedding_dim = len(vector)
+        embeddings_model = HuggingFaceEmbeddings(
+            model_name=config.HUGGINGFACE_EMBEDDING_MODEL  # Use direct config value
+        )
+    else:
+        raise NotImplementedError(f"Embedding backend '{backend}' not supported.")
 
-        return embeddings, embedding_dim
+    # Calculate dimension from a sample query
+    sample = "test"
+    vector = embeddings_model.embed_query(sample)
+    embedding_dim = len(vector)
+
+    return embeddings_model, embedding_dim
+
+
+class TextTitleAnalysis(BaseModel):  # Renamed for clarity: only suggests a title
+    """Pydantic model for structured output from LLM analysis (title only)."""
+
+    suggested_title: str = Field(
+        description="Concise, informative title for the text excerpt."
+    )
 
 
 def analyze_text_sample_with_llm(
     text_sample: str,
-    embedding_dim: int = 384,
-    llm=None,
-):
+    llm: ChatOpenAI,
+) -> str:
     """
-    Ask the LLM to:
-    1. Recommend an optimal chunk size for embeddings based on the model's embedding dimension.
-    2. Recommend an optimal overlap size for smooth semantic continuity.
-    3. Suggest the best title for the text excerpt.
-
-    Args:
-        text_sample (str): Example document content.
-        embedding_dim (int): The number of dimensions of the embedding model.
-        llm: The language model instance to query.
-
-    Returns:
-        dict: {
-            "recommended_chunk_size": int,
-            "recommended_overlap_chunk_size": int,
-            "suggested_title": str
-        }
+    Asks the LLM to suggest a title for the document (Latentcy fix: chunking logic removed).
     """
-
     if llm is None:
-        raise ValueError(
-            "LLM model is not initialized. Please check your configuration or API key."
-        )
+        return "Untitled Document"
 
-    # --- Prompt Template ---
+    # Simplified prompt: only ask for the title
     template = """
-You are an expert in text processing and retrieval optimization.
+You are an expert in text summarization.
 
-Given the following document excerpt and the embedding model dimension of {dimensions}:
-
-1. Recommend the **optimal chunk size** in characters for text splitting that balances semantic coherence and retrieval accuracy.
-2. Recommend the **optimal overlap size** in characters to ensure smooth context continuity between chunks.
-3. Suggest a **concise and meaningful title** for the excerpt (under 10 words).
-
-Return the results in structured form, using integers for numeric values.
+Suggest a **concise and meaningful title** (under 10 words) for the following document excerpt:
 
 Document excerpt:
 ----------------
 {excerpt}
 ----------------
 """
-
     prompt = ChatPromptTemplate.from_template(template)
-    messages = prompt.format_messages(excerpt=text_sample, dimensions=embedding_dim)
+    messages = prompt.format_messages(excerpt=text_sample)
 
-    # --- Structured Output Definition ---
-    class TextSampleAnalysis(BaseModel):
-        recommended_chunk_size: int = Field(
-            description="Optimal chunk size in characters for text splitting."
-        )
-        recommended_overlap_chunk_size: int = Field(
-            description="Optimal overlap size in characters to maintain context."
-        )
-        suggested_title: str = Field(
-            description="Concise, informative title for the text excerpt."
-        )
+    llm_with_structure = llm.with_structured_output(
+        TextTitleAnalysis
+    )  # Use new class name
 
-    llm_with_structure = llm.with_structured_output(TextSampleAnalysis)
-    resp = llm_with_structure.invoke(messages)
-
-    # --- Safe Parsing ---
     try:
-        return {
-            "recommended_chunk_size": int(resp.recommended_chunk_size),
-            "recommended_overlap_chunk_size": int(resp.recommended_overlap_chunk_size),
-            "suggested_title": resp.suggested_title.strip(),
-        }
+        resp = llm_with_structure.invoke(messages)
+        return resp.suggested_title.strip()
     except Exception as e:
-        print(f"Error parsing LLM response: {e}")
-        return {
-            "recommended_chunk_size": 1000,
-            "recommended_overlap_chunk_size": 200,
-            "suggested_title": "Untitled Excerpt",
-        }
+        logging.error(
+            f"Error parsing LLM response for title: {e}. Falling back to default."
+        )
+        return "Untitled Document"
 
 
 def chunk_text(text: str, chunk_size: int, chunk_overlap: int = 200) -> List[Document]:
+    """Splits the text into LangChain Documents."""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -219,86 +231,71 @@ def chunk_text(text: str, chunk_size: int, chunk_overlap: int = 200) -> List[Doc
     return docs
 
 
-def save_vectorstore(faiss_index: FAISS, dirpath: Path):
-    dirpath.mkdir(parents=True, exist_ok=True)
-    faiss_index.save_local(str(dirpath))
+def save_vector_store_to_disk(faiss_index: FAISS, destination_path: Path):
+    """Saves the FAISS index to the specified directory."""
+    destination_path.mkdir(parents=True, exist_ok=True)
+    faiss_index.save_local(str(destination_path))
 
 
-def store_indices_cookies(uid):
-    chat_uid_list.append(uid)
-    expiration = datetime.now() + timedelta(days=0.5)
-    controller.set("chat_uid_list", json.dumps(chat_uid_list), expires=expiration)
+def process_and_index(file_path: Path, file_name: str) -> Dict[str, Any]:
+    """Extracts text, chunks it, and creates a FAISS vector store."""
+    logging.info(f"Starting process and index for {file_name}")
 
-    chat_threads_cookies = controller.get("chat_threads")
-    chat_threads_list = json.loads(chat_threads_cookies)
-    chat_threads_list[uid] = []
-    controller.set("chat_threads", json.dumps(chat_threads_list), expires=expiration)
+    text_content = extract_text(file_path)
+    sample_text = text_content[:2000]
 
-
-def store_indices_chat_thread_cookies(uid, chat_threads: List):
-    chat_threads_list[uid] = chat_threads
-    expiration = datetime.now() + timedelta(days=0.5)
-    controller.set("chat_threads", json.dumps(chat_threads_list), expires=expiration)
-
-
-def load_chat_threads(uid):
-    chat_threads_cookies = controller.get("chat_threads")
-    chat_threads_list = json.loads(chat_threads_cookies)
-
-    chat_threads_list = chat_threads_list[uid]
-
-    return chat_threads_list
-
-
-def process_and_index(file_path: Path, name: str, embeddings_backend="openai") -> str:
-    text = extract_text(file_path)
-    # choose chunk size heuristically or using LLM guidance (optional)
-
-    sample = text[:2000]
+    # Initialize LLM and Embeddings
     llm = ChatOpenAI(
-        api_key=OPENAI_API_KEY,
-        model=llm_model_name,
+        api_key=openai_api_key,  # Use consistent snake_case
+        model=llm_model_name,  # Use consistent snake_case
         streaming=False,
         temperature=0.0,
     )
-    embeddings, embeddings_dimension = get_embeddings()
+    embeddings_model, _ = get_embeddings(
+        embeddings_backend
+    )  # Use consistent snake_case
 
-    analysis_result = analyze_text_sample_with_llm(
-        sample, embedding_dim=embeddings_dimension, llm=llm
-    )
-    recommended_chunk_size = analysis_result["recommended_chunk_size"]
-    recommended_overlap_chunk_size = analysis_result["recommended_overlap_chunk_size"]
-    suggested_title = analysis_result["suggested_title"]
+    # Use default chunking parameters for speed (Fix: Latency During Indexing)
+    recommended_chunk_size = config.DEFAULT_CHUNK_SIZE
+    recommended_overlap_chunk_size = config.DEFAULT_CHUNK_OVERLAP
 
-    docs = chunk_text(
-        text,
+    # Analyze sample to determine title (fast LLM call)
+    suggested_title = analyze_text_sample_with_llm(sample_text, llm=llm)
+
+    # Chunk the entire document
+    documents = chunk_text(
+        text_content,
         chunk_size=recommended_chunk_size,
         chunk_overlap=recommended_overlap_chunk_size,
     )
 
-    store = FAISS.from_documents(docs, embeddings)
+    # Create and save the FAISS vector store
+    vector_store = FAISS.from_documents(documents, embeddings_model)
 
-    # Save FAISS index + docstore metadata
-    store.save_local("vectorstores/my_index")
+    chat_id = str(uuid.uuid4())
+    destination_dir = INDEX_DIRECTORY / chat_id
+    save_vector_store_to_disk(vector_store, destination_dir)
+    logging.info(f"Saved FAISS index to {destination_dir}")
 
-    uid = str(uuid.uuid4())
-    dest = INDEX_DIR / uid
-    save_vectorstore(store, dest)
-
-    timestamp = time.time()
-
-    store_indices_cookies(uid)
-
-    meta = {
-        "uid": uid,
-        "name": name,
+    # Save metadata
+    metadata = {
+        "uid": chat_id,
+        "name": file_name,
         "title": suggested_title,
         "source_path": str(file_path),
-        "n_chunks": len(docs),
+        "n_chunks": len(documents),
         "chunk_size": recommended_chunk_size,
-        "embeddings_backend": embeddings_backend,
-        "uploaded_date": timestamp,
+        "embeddings_backend": embeddings_backend,  # Use consistent snake_case
+        "uploaded_date": time.time(),
     }
-    with open(dest / "meta.pkl", "wb") as f:
-        pickle.dump(meta, f)
-    return meta
+    try:
+        with open(destination_dir / "meta.pkl", "wb") as f:
+            pickle.dump(metadata, f)
+        logging.info(f"Saved metadata for {chat_id}")
+    except IOError as e:
+        logging.error(f"Failed to save metadata for {chat_id}: {e}")
+
+    # Initialize the chat history file (Fix: Fragile Chat History Persistence)
+    save_chat_history(chat_id, [])
+
+    return metadata
