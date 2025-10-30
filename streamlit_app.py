@@ -106,14 +106,7 @@ st.markdown("---")  # Separator
 
 if st.session_state.active_chat_id == "":
 
-    # --- File Upload and Indexing Area ---
-    st.header("1) Upload a PDF or TXT")
-    uploaded_file = st.file_uploader(
-        "Upload PDF, TXT, or MD", type=["pdf", "txt", "md"], accept_multiple_files=False
-    )
-
     # --- Important Usage Notes (Drafted for Simplicity) ---
-    st.markdown("---")
     st.subheader("💡 Important Usage Notes")
     st.info(
         """
@@ -135,6 +128,12 @@ if st.session_state.active_chat_id == "":
     )
     st.markdown("---")
     # --- End Usage Notes ---
+
+    # --- File Upload and Indexing Area ---
+    st.header("1) Upload a PDF or TXT")
+    uploaded_file = st.file_uploader(
+        "Upload PDF, TXT, or MD", type=["pdf", "txt", "md"], accept_multiple_files=False
+    )
 
     # Display a warning about the default chunking settings (Fix: Latency During Indexing)
     st.info(
